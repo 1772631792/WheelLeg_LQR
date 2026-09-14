@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+controller/*.dll
+controller/*.exe
+outputs/

@@ -1,0 +1,266 @@
+"""Tk owns widgets; one worker owns MuJoCo, its GL context and the C controller."""
+import json
+import queue
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+import numpy as np
+from PIL import Image, ImageTk
+from simulation.chassis_sim import ROOT
+
+
+class MuJoCoPanel(ttk.Frame):
+    def __init__(self,parent):
+        super().__init__(parent)
+        self.worker=None;self.closed=False;self.stop=threading.Event()
+        self.commands=queue.SimpleQueue();self.events=queue.SimpleQueue();self.frames=queue.Queue(1)
+        self.keys=set();self.active=False;self.high=False;self.fast=False
+        self.camera=[45.,-24.,3.2];self.overview=False;self.drag=None;self.run=None;self.report=None;self.design_busy=False
+        self.loop=tk.BooleanVar(value=True);self.use_generated=tk.BooleanVar(value=False)
+        self.scene=tk.StringVar(value='飞坡');self.duration=tk.StringVar(value='12')
+        self.substeps=tk.StringVar(value='1');self.resolution=tk.StringVar(value='960x540')
+        self.note=tk.StringVar(value='源代码控制器 · 1 kHz · 六电机 · 真正五连杆闭链与接触动力学。点击进入操控模式。')
+        row=ttk.Frame(self);row.pack(fill='x')
+        ttk.Button(row,text='进入操控 / R 重置',command=self.start_live).pack(side='left')
+        ttk.Button(row,text='停止并保存记录',command=self.halt).pack(side='left',padx=4)
+        ttk.Combobox(row,textvariable=self.scene,values=['飞坡','一级台阶','平地'],state='readonly',width=9).pack(side='left')
+        ttk.Label(row,text='预计算秒数').pack(side='left',padx=(10,0))
+        ttk.Entry(row,textvariable=self.duration,width=5).pack(side='left')
+        ttk.Button(row,text='预计算直行',command=lambda:self.start_run('batch')).pack(side='left',padx=4)
+        ttk.Button(row,text='播放记录',command=lambda:self.start_run('replay')).pack(side='left')
+        ttk.Checkbutton(row,text='循环',variable=self.loop,command=self.send).pack(side='left')
+        ttk.Button(row,text='全图 / 跟随',command=self.toggle_camera).pack(side='left')
+        ttk.Button(row,text='导出记录',command=self.export).pack(side='right')
+        quality=ttk.Frame(self);quality.pack(fill='x',pady=(4,0))
+        ttk.Label(quality,text='控制固定 1 ms / 物理子步数').pack(side='left')
+        ttk.Combobox(quality,textvariable=self.substeps,values=['1','2','4'],state='readonly',width=4).pack(side='left',padx=4)
+        ttk.Label(quality,text='渲染分辨率').pack(side='left',padx=(12,0))
+        ttk.Combobox(quality,textvariable=self.resolution,values=['800x450','960x540','1280x720'],state='readonly',width=10).pack(side='left',padx=4)
+        ttk.Label(quality,text='下次启动生效；实时记录最多 120 s，性能不足可降低分辨率或预计算。').pack(side='left',padx=10)
+        ttk.Label(self,text='W/S 前后 · A/D 转向 · C 高低腿 · G 快慢 · Shift 收放腿越阶 · Ctrl+C 零力 · Esc 退出控制\n右键拖动第三人称相机 / 滚轮缩放。飞坡高 32 cm，另一车道为 4 cm 台阶；预计算使用高腿、0.7 m/s。').pack(anchor='w',pady=5)
+        book=ttk.Notebook(self);book.pack(fill='both',expand=True)
+        view=ttk.Frame(book);book.add(view,text='第三人称地图')
+        self.screen=tk.Label(view,bg='#17232e',fg='#c8dce8',text='MuJoCo 五连杆试验场\n\n启动后显示物理渲染画面',takefocus=True,width=1,height=1)
+        self.screen.pack(fill='both',expand=True)
+        self.screen.bind('<Button-1>',lambda e:self.screen.focus_set())
+        self.screen.bind('<KeyPress>',self.key_down);self.screen.bind('<KeyRelease>',self.key_up)
+        self.screen.bind('<FocusOut>',lambda e:self.release())
+        self.screen.bind('<ButtonPress-3>',self.drag_start);self.screen.bind('<B3-Motion>',self.drag_camera)
+        self.screen.bind('<MouseWheel>',self.zoom)
+        self.plots=ttk.Frame(book);book.add(self.plots,text='本次物理记录曲线')
+        ttk.Label(self.plots,text='停止操控或预计算完成后显示。与前面简化模型的曲线独立，全部来自 MuJoCo + 参考 C 代码。').pack(anchor='w')
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.figure=Figure(figsize=(10,5),dpi=90);self.plot_canvas=FigureCanvasTkAgg(self.figure,master=self.plots)
+        self.plot_canvas.get_tk_widget().pack(fill='both',expand=True)
+        design=ttk.Frame(book,padding=8);book.add(design,text='替代 MATLAB / 六状态矩阵')
+        ttk.Label(design,text='每腿状态 [θ, θ̇, p, v, pitch, pitch_rate]，输出 [轮力矩, 虚拟髋力矩]。C 迭代求解 DARE，Python 离线建模和验证。').pack(anchor='w')
+        edit=ttk.Frame(design);edit.pack(fill='x',pady=8)
+        self.q=tk.StringVar(value='480 240 200 600 2000 50');self.r=tk.StringVar(value='2.5 0.25')
+        ttk.Label(edit,text='Q 对角').pack(side='left');ttk.Entry(edit,textvariable=self.q,width=32).pack(side='left')
+        ttk.Label(edit,text='R 对角').pack(side='left',padx=(10,0));ttk.Entry(edit,textvariable=self.r,width=12).pack(side='left')
+        self.design_button=ttk.Button(edit,text='C 重算 30 个腿长节点',command=self.design);self.design_button.pack(side='left',padx=8)
+        ttk.Checkbutton(design,text='下一次启动使用重算的增益（未勾选时使用原始固件参数）',variable=self.use_generated).pack(anchor='w')
+        select=ttk.Frame(design);select.pack(fill='x',pady=8)
+        self.node=tk.StringVar(value='0.18');self.matrix=tk.StringVar(value='K')
+        self.design_note=tk.StringVar(value='完成后显示所选腿长的闭环稳定性与 C 迭代次数。')
+        a=ttk.Combobox(select,textvariable=self.node,values=[f'{v/100:.2f}' for v in range(10,40)],width=7,state='readonly');a.pack(side='left');a.bind('<<ComboboxSelected>>',lambda e:self.preview())
+        b=ttk.Combobox(select,textvariable=self.matrix,values=['A','B','Ad','Bd','Q','R','Qd','Rd','Nd','P','K','eigenvalues','lqr_coefficients','mpc_coefficients'],width=18,state='readonly');b.pack(side='left');b.bind('<<ComboboxSelected>>',lambda e:self.preview())
+        ttk.Button(select,text='只复制当前矩阵',command=self.copy_matrix).pack(side='left',padx=8)
+        ttk.Label(design,textvariable=self.design_note).pack(anchor='w',pady=4)
+        self.text=tk.Text(design,font=('Consolas',10),wrap='none');self.text.pack(fill='both',expand=True)
+        self.text.insert('end','点击重算生成 design.json 与 regenerated_gains.h。\n使用连续代价精确离散化（含交叉项 N），与参考 GenerateGains.m 对齐。');self.text.configure(state='disabled')
+        ttk.Label(self,textvariable=self.note).pack(anchor='w',pady=5)
+        self.after(30,self.poll)
+
+    def send(self):
+        self.commands.put(dict(keys=set(self.keys),high=self.high,fast=self.fast,camera=list(self.camera),loop=self.loop.get(),overview=self.overview))
+
+    def toggle_camera(self):self.overview=not self.overview;self.send()
+
+    def release(self):
+        self.keys.clear();self.send()
+
+    def key_down(self,event):
+        if not self.active:return
+        key=event.keysym.lower()
+        if key not in self.keys:
+            if key=='c' and not event.state&4:self.high=not self.high
+            if key=='g':self.fast=not self.fast
+            if key=='r':self.start_live();return 'break'
+            if key=='escape':self.halt();return 'break'
+        self.keys.add(key)
+        if event.state&4:self.keys.add('control_l')
+        self.send();return 'break'
+
+    def key_up(self,event):
+        key=event.keysym.lower();self.keys.discard(key)
+        if key.startswith('control'):self.keys.difference_update({'control_l','control_r'})
+        self.send();return 'break'
+
+    def drag_start(self,event):self.drag=(event.x,event.y);self.screen.focus_set()
+    def drag_camera(self,event):
+        if self.drag:
+            self.camera[0]+=(event.x-self.drag[0])*.4
+            self.camera[1]=float(np.clip(self.camera[1]+(event.y-self.drag[1])*.3,-80,-5))
+            self.drag=(event.x,event.y);self.send()
+    def zoom(self,event):
+        self.camera[2]=float(np.clip(self.camera[2]*(.9 if event.delta>0 else 1.1),.6,12));self.send()
+
+    def halt(self):self.active=False;self.release();self.stop.set()
+    def start_live(self):self.start_run('live')
+    def start_run(self,mode):
+        if self.worker and self.worker.is_alive():
+            self.halt();self.after(80,lambda:self.start_run(mode) if not self.closed else None);return
+        if mode=='replay' and self.run is None:self.note.set('请先完成一次操控或预计算。');return
+        try:
+            duration=float(self.duration.get())
+            if not np.isfinite(duration) or not .1<=duration<=120:raise ValueError('时间范围为 0.1–120 秒')
+            if self.use_generated.get() and self.report is None:raise ValueError('请先重算参数')
+        except ValueError as exc:messagebox.showerror('设置错误',str(exc));return
+        self.stop=threading.Event();self.active=mode=='live';self.keys.clear();self.high=False
+        # Drain old input, so a held key can never survive a reset.
+        while not self.commands.empty():self.commands.get()
+        options=dict(mode=mode,duration=duration,scene=self.scene.get(),report=self.report if self.use_generated.get() else None,run=self.run,
+                     substeps=int(self.substeps.get()),resolution=tuple(map(int,self.resolution.get().split('x'))))
+        self.send();self.worker=threading.Thread(target=self.simulate,args=(options,self.stop),daemon=True);self.worker.start()
+        self.screen.focus_set();self.note.set('正在初始化 MuJoCo / OpenGL…')
+
+    def simulate(self,options,stop):
+        arena=renderer=None;records=[];positions=[]
+        try:
+            from simulation.mujoco_engine import Arena,mujoco
+            initial_height=options['run']['initial_height'] if options['mode']=='replay' else (.26 if options['mode']=='batch' else .18)
+            arena=Arena(height=initial_height,terrain=True,substeps=options['substeps'])
+            if options['scene']=='一级台阶':arena.data.qpos[1]=2.3
+            if options['scene']=='平地':arena.data.qpos[1]=-2.3
+            mujoco.mj_forward(arena.model,arena.data)
+            if options['report']:
+                report=options['report'];arena.firmware.dll.FW_SetCoefficients(np.array(report['lqr_coefficients']),np.array(report['mpc_coefficients']))
+            width,height=options['resolution'];renderer=mujoco.Renderer(arena.model,height=height,width=width)
+            camera=mujoco.MjvCamera();mujoco.mjv_defaultCamera(camera)
+            controls=dict(keys=set(),high=False,fast=False,camera=[45,-24,3.2],loop=True,overview=False)
+            start=time.perf_counter();next_frame=start;frames=0;mode=options['mode'];run=options['run'];replay_start=start
+            while not stop.is_set():
+                while not self.commands.empty():controls=self.commands.get()
+                now=time.perf_counter();keys=controls['keys']
+                if mode=='replay':
+                    elapsed=now-replay_start;duration=run['records'][-1,0]-run['records'][0,0]
+                    if elapsed>duration:
+                        if controls['loop']:replay_start=now;elapsed=0
+                        else:break
+                    idx=min(len(run['qpos'])-1,np.searchsorted(run['records'][:,0],elapsed+run['records'][0,0]))
+                    arena.data.qpos[:]=run['qpos'][idx];arena.data.time=run['records'][idx,0];mujoco.mj_forward(arena.model,arena.data)
+                else:
+                    steps=50 if mode=='batch' else min(50,max(0,int(((now-start)-arena.data.time)/.001)))
+                    for _ in range(steps):
+                        if stop.is_set():break
+                        if mode=='batch':speed=.7 if arena.data.time>1 else 0;yaw=0;height=.26;jump=zero=False
+                        else:
+                            speed=(('w' in keys)-('s' in keys))*(2.5 if controls['fast'] else 1.5)
+                            yaw=(('a' in keys)-('d' in keys))*.8;height=.26 if controls['high'] else .18
+                            jump=bool({'shift_l','shift_r'}&keys);zero='c' in keys and bool({'control_l','control_r'}&keys)
+                        arena.step(speed,yaw,height,jump,zero)
+                        if arena.steps%20==0:
+                            records.append(np.r_[arena.data.time,arena.sensor,arena.firmware.log,arena.firmware.output])
+                            positions.append(arena.data.qpos.copy())
+                        if not np.isfinite(arena.data.qpos).all() or abs(arena.sensor[0])>1.2 or abs(arena.sensor[2])>1.2:
+                            raise RuntimeError('底盘已倾覆，记录已保留。按 R 或进入操控重置。')
+                        if arena.data.time>= (options['duration'] if mode=='batch' else 120):stop.set();break
+                if now>=next_frame or stop.is_set():
+                    rotation=arena.data.xmat[arena.body].reshape(3,3)
+                    heading=np.arctan2(rotation[1,0],rotation[0,0])
+                    camera.lookat[:]=arena.data.xpos[arena.body]+[.5*np.cos(heading),.5*np.sin(heading),.05]
+                    camera.azimuth,camera.elevation,camera.distance=controls['camera']
+                    camera.azimuth+=np.degrees(heading)
+                    if controls['overview']:
+                        camera.lookat[:]=[.3,1,.1];camera.azimuth=45;camera.elevation=-40;camera.distance=6.5
+                    renderer.update_scene(arena.data,camera);pixels=renderer.render().copy();frames+=1
+                    elapsed=max(time.perf_counter()-start,.001)
+                    hud=f"{mode} | t={arena.data.time:.2f}s | physics {arena.snapshot()['rtf']:.1f}x | wall {arena.data.time/elapsed:.2f}x | {frames/elapsed:.0f} FPS"
+                    if mode!='replay':hud+=f" | pitch {np.degrees(arena.sensor[0]):+.1f}° | leg {arena.firmware.log[0]:.3f}/{arena.firmware.log[8]:.3f}m"
+                    if self.frames.full():self.frames.get_nowait()
+                    self.frames.put_nowait((pixels,hud));next_frame=max(next_frame+1/30,time.perf_counter())
+                if mode!='batch':stop.wait(.002)
+            if mode=='replay':self.events.put(('status','回放结束。'))
+        except Exception as exc:self.events.put(('error',str(exc)))
+        finally:
+            if records:self.events.put(('run',dict(records=np.array(records),qpos=np.array(positions),scene=options['scene'],dt=.001,
+                                                  initial_height=initial_height,substeps=options['substeps'],gain_source='regenerated' if options['report'] else 'original')))
+            if renderer is not None:renderer.close()
+            if arena is not None:arena.firmware.close()
+            self.events.put(('done',None))
+
+    def poll(self):
+        if self.closed:return
+        try:
+            pixels,hud=self.frames.get_nowait();picture=Image.fromarray(pixels)
+            size=(max(1,self.screen.winfo_width()),max(1,self.screen.winfo_height()))
+            picture.thumbnail(size,Image.Resampling.BILINEAR)
+            self.photo=ImageTk.PhotoImage(picture);self.screen.configure(image=self.photo,text='');self.note.set(hud)
+        except queue.Empty:pass
+        while not self.events.empty():
+            kind,value=self.events.get()
+            if kind=='run':self.run=value;self.draw_curves()
+            elif kind=='design':self.report=value;self.preview();self.note.set('30 个节点已验证稳定并导出。可勾选重算参数用于下一次物理仿真。')
+            elif kind=='design_done':self.design_busy=False;self.design_button.configure(state='normal')
+            elif kind=='done':self.active=False
+            elif kind in ('error','status'):self.note.set(value)
+        self.after(30,self.poll)
+
+    def draw_curves(self):
+        a=self.run['records'];t=a[:,0];self.figure.clear();axes=self.figure.subplots(2,4)
+        for ax,cols,labels,title,unit in zip(axes.flat,[[1,2],[3,5],[7,8],[19,27],[20,28],[22,30],[39,40],[41,42,43,44]],
+                [['pitch','pitch rate'],['roll','yaw'],['distance','velocity'],['L','R'],['L','R'],['L','R'],['L','R'],['L back','L front','R back','R front']],
+                ['Pitch','Roll / Yaw','Travel','Leg length','Virtual theta','Theta rate','Wheel torque','Joint torque'],
+                ['rad / rad/s','rad','m / m/s','m','rad','rad/s','Nm','Nm']):
+            for col,label in zip(cols,labels):ax.plot(t,a[:,col],label=label,lw=1)
+            ax.set(title=title,xlabel='time (s)',ylabel=unit);ax.grid(alpha=.2);ax.legend(fontsize=7)
+        self.figure.tight_layout();self.plot_canvas.draw_idle()
+
+    def export(self):
+        if self.run is None:self.note.set('请先停止操控，或完成预计算。');return
+        output=ROOT/'outputs'/'mujoco';output.mkdir(parents=True,exist_ok=True)
+        np.savez_compressed(output/'record.npz',**self.run)
+        headers=['time','pitch','pitch_rate','roll','roll_rate','yaw','yaw_rate','distance','velocity']
+        for side in ('L','R'):headers.extend(f'{side}_{x}' for x in ('phi1','phi4','rate1','rate4','normal'))
+        for side in ('L','R'):headers.extend(f'{side}_{x}' for x in ('length','theta','length_rate','theta_rate','force','hip_torque','normal_control','airborne'))
+        headers+=['target_velocity','target_distance','target_yaw','stair_state','wheel_L','wheel_R','back_L','front_L','back_R','front_R']
+        np.savetxt(output/'record.csv',self.run['records'],delimiter=',',header=','.join(headers),comments='')
+        self.figure.savefig(output/'curves.png',dpi=160);self.note.set('已导出：'+str(output))
+
+    def design(self):
+        if self.design_busy:return
+        try:
+            q=np.array([float(v) for v in self.q.get().split()]);r=np.array([float(v) for v in self.r.get().split()])
+            if q.shape!=(6,) or r.shape!=(2,) or not np.isfinite(np.r_[q,r]).all() or (q<=0).any() or (r<=0).any():raise ValueError('Q 需要 6 个、R 需要 2 个正数')
+        except ValueError as exc:messagebox.showerror('参数错误',str(exc));return
+        self.design_busy=True;self.design_button.configure(state='disabled');self.note.set('C 正在求解各腿长节点的 Riccati 方程…')
+        def work():
+            try:
+                from simulation.source_design import generate
+                self.events.put(('design',generate(q_values=q,r_values=r)))
+            except Exception as exc:self.events.put(('error',str(exc)))
+            finally:self.events.put(('design_done',None))
+        threading.Thread(target=work,daemon=True).start()
+
+    def value(self):
+        if self.report is None:return None
+        key=self.matrix.get()
+        return self.report[key] if key in self.report else self.report['records'][round(float(self.node.get())*100)-10][key]
+    def preview(self):
+        value=self.value()
+        if value is None:return
+        from simulation.host_app import matrix_initializer
+        self.text.configure(state='normal');self.text.delete('1.0','end');self.text.insert('end',matrix_initializer(value));self.text.configure(state='disabled')
+        node=self.report['records'][round(float(self.node.get())*100)-10]
+        self.design_note.set(f"h={node['height']:.2f} m | C 迭代 {node['iterations']} 次 | ρ(Ad−BdK)={node['spectral_radius']:.9f} < 1 | eigenvalues 两列为实部、虚部")
+    def copy_matrix(self):
+        value=self.value()
+        if value is None:return
+        from simulation.host_app import matrix_initializer
+        self.clipboard_clear();self.clipboard_append(matrix_initializer(value));self.note.set('已复制当前矩阵，无说明文字。')
+    def close(self):
+        self.closed=True;self.halt()
+        if self.worker and self.worker.is_alive():self.worker.join(timeout=3)
