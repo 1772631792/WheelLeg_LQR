@@ -2,7 +2,7 @@ CC = gcc
 PYTHON = python
 CFLAGS = -std=c11 -O2 -Wall -Wextra -Werror -pedantic
 
-.PHONY: all design test-c verify verify-gui verify-mujoco design-source run animate disturbance
+.PHONY: all design test-c verify verify-gui verify-mujoco verify-production design-source run animate disturbance
 all: controller/controller.dll controller/controller_test.exe controller/firmware.dll
 
 controller/firmware.dll: controller/firmware_bridge.c controller/riccati6.c balance_chassis-main/application/chassis/lqr_calc.h balance_chassis-main/application/chassis/linkNleg.h balance_chassis-main/application/chassis/balance.h
@@ -34,6 +34,9 @@ verify-gui: all
 verify-mujoco: all
 	$(PYTHON) -m simulation.verify_mujoco
 	$(PYTHON) -m simulation.verify_mujoco_gui
+
+verify-production: all
+	$(PYTHON) -m simulation.verify_production_export
 
 design-source: all
 	$(PYTHON) -m simulation.source_design

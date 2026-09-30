@@ -4,6 +4,7 @@ import time
 import numpy as np
 from PIL import Image
 from simulation.mujoco_engine import Arena,mujoco
+from simulation.mujoco_model import leg_joint_ranges
 from simulation.chassis_sim import ROOT
 
 
@@ -33,6 +34,17 @@ def experiment(name,seconds,speed=0,y=0,height=.18):
 
 def main():
     output=ROOT/'outputs'/'mujoco';output.mkdir(parents=True,exist_ok=True)
+    # Every articulated leg joint is mechanically limited, and changing the
+    # public length range changes the generated angular stops.
+    wide=leg_joint_ranges(.18,.15,.30);narrow=leg_joint_ranges(.18,.17,.27)
+    assert all(wide[key][0]<narrow[key][0]<narrow[key][1]<wide[key][1] for key in wide)
+    limited=Arena(terrain=False,min_leg_height=.17,max_leg_height=.27)
+    try:
+        for name in ('LA','LAknee','LE','LEknee','RA','RAknee','RE','REknee'):
+            assert limited.model.jnt_limited[limited.model.joint(name).id]
+        for _ in range(1500):limited.step(height=.33)
+        assert np.isfinite(limited.data.qpos).all()
+    finally:limited.firmware.close()
     results=[experiment('stand',3),experiment('ramp',12,.7,height=.26),experiment('step',10,.7,y=2.3,height=.26)]
     a=Arena();renderer=mujoco.Renderer(a.model,height=450,width=800)
     try:

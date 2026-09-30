@@ -20,6 +20,8 @@ def main():
         assert not panel.worker.is_alive();pump(.2)
     try:
         app.tabs.select(app.pages['MuJoCo 实景']);root.update()
+        assert panel.min_leg_height.get()=='0.15' and panel.max_leg_height.get()=='0.30'
+        assert panel.stability_assist.get()
         panel.scene.set('平地');panel.start_live();pump(1)
         panel.key_down(SimpleNamespace(keysym='w',state=0));pump(2)
         panel.key_up(SimpleNamespace(keysym='w'));panel.key_down(SimpleNamespace(keysym='c',state=0));pump(1)

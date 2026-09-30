@@ -7,11 +7,12 @@ from simulation.firmware_native import Firmware
 
 
 class Arena:
-    def __init__(self,height=.18,terrain=True,substeps=1):
+    def __init__(self,height=.18,terrain=True,substeps=1,min_leg_height=.15,max_leg_height=.30,stability_assist=True):
         if substeps not in (1,2,4):raise ValueError('substeps must be 1, 2 or 4')
-        self.model,self.data=create(height,terrain);self.control_dt=.001;self.substeps=substeps
+        self.model,self.data=create(height,terrain,min_leg_height,max_leg_height);self.control_dt=.001;self.substeps=substeps
         self.model.opt.timestep=self.control_dt/substeps;self.firmware=Firmware(self.control_dt)
         self.start_angles=angles(height);self.distance=0.;self.height=height
+        self.min_leg_height=min_leg_height;self.max_leg_height=max_leg_height;self.stability_assist=stability_assist
         self.body=self.model.body('chassis').id
         self.qidx={name:self.model.joint(name).qposadr[0] for name in ('LA','LE','RA','RE')}
         self.vidx={name:self.model.joint(name).dofadr[0] for name in self.qidx}
@@ -41,7 +42,17 @@ class Arena:
 
     def step(self,speed=0,yaw_rate=0,height=None,jump=False,zero=False):
         start=time.perf_counter()
-        self.observe();self.command[:]=[speed,yaw_rate,height if height is not None else self.height,jump,zero,self.data.time]
+        self.observe()
+        requested_height=height if height is not None else self.height
+        requested_height=float(np.clip(requested_height,self.min_leg_height,self.max_leg_height))
+        if self.stability_assist:
+            # Ease aggressive commands before a lean becomes unrecoverable.  At
+            # speed, sharp steering is the dominant rollover trigger.
+            tilt=max(abs(self.sensor[0]),abs(self.sensor[2]))
+            tilt_scale=float(np.clip((np.radians(42)-tilt)/np.radians(24),0,1))
+            steering_scale=max(.3,1-abs(self.sensor[7])/2.5)
+            speed*=tilt_scale;yaw_rate*=tilt_scale*steering_scale
+        self.command[:]=[speed,yaw_rate,requested_height,jump,zero,self.data.time]
         output=self.firmware.update(self.sensor,self.command)
         self.data.ctrl[:]=output[[0,2,3,1,4,5]]
         for _ in range(self.substeps):mujoco.mj_step(self.model,self.data)

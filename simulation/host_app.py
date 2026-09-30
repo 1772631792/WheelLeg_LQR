@@ -43,7 +43,7 @@ class HostApp:
         self.progress=ttk.Progressbar(bar,length=200,maximum=100);self.progress.pack(side='right')
         self.tabs=ttk.Notebook(root);self.tabs.pack(fill='both',expand=True,padx=10)
         self.pages={}
-        for name in ('仿真设置','C算法与增益','平衡曲线','腿长与电机','二维机构','三维底盘','参数导览','MuJoCo 实景'):
+        for name in ('仿真设置','C算法与增益','平衡曲线','腿长与电机','二维机构','三维底盘','参数导览','MuJoCo 实景','生产代码导出'):
             page=ttk.Frame(self.tabs,padding=8);self.tabs.add(page,text=name);self.pages[name]=page
         self.make_settings()
         self.make_matrix_panel()
@@ -59,6 +59,9 @@ class HostApp:
         from simulation.mujoco_panel import MuJoCoPanel
         self.arena_panel=MuJoCoPanel(self.pages['MuJoCo 实景'])
         self.arena_panel.pack(fill='both',expand=True)
+        from simulation.production_export_panel import ProductionExportPanel
+        self.production_panel=ProductionExportPanel(self.pages['生产代码导出'],self.arena_panel)
+        self.production_panel.pack(fill='both',expand=True)
         playback=ttk.Frame(root,padding=10);playback.pack(fill='x');self.playback=playback
         self.play_button=ttk.Button(playback,text='播放 / 暂停',command=self.toggle_play);self.play_button.pack(side='left')
         ttk.Button(playback,text='回到起点',command=self.rewind).pack(side='left',padx=4)
@@ -246,7 +249,7 @@ class HostApp:
 
     def render(self):
         name=self.tabs.tab(self.tabs.select(),'text')
-        if name=='MuJoCo 实景':self.playback.pack_forget()
+        if name in ('MuJoCo 实景','生产代码导出'):self.playback.pack_forget()
         elif not self.playback.winfo_manager():self.playback.pack(fill='x',before=self.status_label)
         if self.result is None:return
         index=min(np.searchsorted(self.result['time'],self.current),len(self.result['time'])-1)
@@ -276,7 +279,7 @@ class HostApp:
             except OSError as exc:messagebox.showerror('导出失败',str(exc))
 
     def close(self):
-        self.closed=True;self.cancel.set();self.arena_panel.close();self.root.destroy()
+        self.closed=True;self.cancel.set();self.arena_panel.close();self.production_panel.close();self.root.destroy()
 
 
 def launch(settings=None):

@@ -2,6 +2,9 @@
 import time
 import json
 import sys
+import shutil
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 import tkinter as tk
 import numpy as np
@@ -11,7 +14,7 @@ from simulation.chassis_sim import ROOT
 
 
 def main():
-    root=tk.Tk();root.withdraw();app=HostApp(root)
+    root=tk.Tk();root.withdraw();app=HostApp(root);production_directory=Path(tempfile.mkdtemp(prefix='wlc_ui_verify_'))
     try:
         app.fields['duration'].set('5')
         app.compute()
@@ -21,6 +24,14 @@ def main():
         assert app.result is not None,'Background calculation did not finish'
         for tab in app.pages.values():
             app.tabs.select(tab);root.update();app.render();root.update()
+        assert '生产代码导出' in app.pages
+        production=app.production_panel;production.output.set(str(production_directory/'wheelleg_control'))
+        production.start();deadline=time.perf_counter()+30
+        while production.worker.is_alive() and time.perf_counter()<deadline:root.update();time.sleep(.01)
+        while production.state.get().startswith('正在') and time.perf_counter()<deadline:root.update();time.sleep(.01)
+        assert not production.worker.is_alive()
+        assert (production_directory/'wheelleg_control'/'manifest.json').exists()
+        assert production.state.get()=='导出完成并通过独立编译/自测。'
         app.seek('2.5');assert app.current==2.5
         app.toggle_play();deadline=time.perf_counter()+.2
         while time.perf_counter()<deadline:root.update();time.sleep(.01)
@@ -75,10 +86,10 @@ def main():
         deadline=time.perf_counter()+10
         while app.worker.is_alive() and time.perf_counter()<deadline:root.update();time.sleep(.01)
         root.update();assert not app.worker.is_alive();assert app.result is previous
-        print('PASS: Tk startup, worker, eight tabs, seek/play/loop/end, matrix-only clipboard,')
-        print('      11 diagram hover/pin/curve links, export and cancellation.')
+        print('PASS: Tk startup, worker, nine tabs, seek/play/loop/end, matrix-only clipboard,')
+        print('      11 diagram hover/pin/curve links, data/code export and cancellation.')
     finally:
-        app.close()
+        app.close();shutil.rmtree(production_directory,ignore_errors=True)
 
 
 if __name__=='__main__':main()

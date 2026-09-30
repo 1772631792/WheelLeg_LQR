@@ -16,11 +16,48 @@ def angles(height=.18):
 def quat(angle):return f'{math.cos(angle/2):.10g} 0 {math.sin(angle/2):.10g} 0'
 
 
-def xml(height=.18,terrain=True):
+def _wrapped_delta(value, reference):
+    return (value-reference+math.pi)%(2*math.pi)-math.pi
+
+
+def leg_joint_ranges(height=.18, min_height=.15, max_height=.30):
+    """Return joint-coordinate limits for the normal vertical five-bar branch.
+
+    MuJoCo joint coordinates are offsets from the XML pose.  The public limit
+    parameters are effective leg lengths, which are much easier to tune than
+    eight unrelated joint angles.
+    """
+    if not all(math.isfinite(v) for v in (height,min_height,max_height)):
+        raise ValueError('leg heights must be finite')
+    if not .14<=min_height<max_height<=.33:
+        raise ValueError('leg limits require 0.14 <= minimum < maximum <= 0.33 m')
+    if not min_height<=height<=max_height:
+        raise ValueError('initial leg height must be inside the configured limits')
+    base=angles(height)
+    samples=[angles(float(v)) for v in np.linspace(min_height,max_height,101)]
+    result={}
+    # A/E are active hips.  The knee coordinate is lower-link angle minus its
+    # parent upper-link angle, not the lower link's world angle.
+    coordinates={
+        'A':lambda p:p[0], 'Aknee':lambda p:p[1]-p[0],
+        'E':lambda p:p[3], 'Eknee':lambda p:p[2]-p[3],
+    }
+    base_coordinates={key:fn(base) for key,fn in coordinates.items()}
+    for key,fn in coordinates.items():
+        values=[_wrapped_delta(fn(p),base_coordinates[key]) for p in samples]
+        # A small allowance prevents chatter when the requested height is at an endpoint.
+        result[key]=(min(values)-math.radians(1),max(values)+math.radians(1))
+    return result
+
+
+def xml(height=.18,terrain=True,min_leg_height=.15,max_leg_height=.30):
     p1,p2,p3,p4=angles(height)
+    limits=leg_joint_ranges(height,min_leg_height,max_leg_height)
     legs=[];eq=[];act=[]
     for side,y,color in [('L',.26,'0.06 0.62 0.78 1'),('R',-.26,'0.95 0.48 0.14 1')]:
         for key,hip,upper,lower in [('A',-.06,p1,p2),('E',.06,p4,p3)]:
+            hip_range=' '.join(f'{v:.10g}' for v in limits[key])
+            knee_range=' '.join(f'{v:.10g}' for v in limits[key+'knee'])
             wheel=''
             if key=='A':
                 wheel=f'''<body name="{side}wheel" pos=".24 0 0" quat="{quat(-lower)}">
@@ -31,10 +68,10 @@ def xml(height=.18,terrain=True):
                   <geom type="capsule" fromto="-.055 .027 0 .055 .027 0" size=".006" rgba="{color}" contype="0" conaffinity="0"/>
                 </body>'''
             legs.append(f'''<body name="{side}{key}upper" pos="{hip} {y} 0" quat="{quat(upper)}">
-              <joint name="{side}{key}" axis="0 1 0" damping=".03" armature=".001"/>
+              <joint name="{side}{key}" axis="0 1 0" damping=".03" armature=".001" limited="true" range="{hip_range}" margin=".01"/>
               <geom type="capsule" fromto="0 0 0 .135 0 0" size=".012" mass=".1437" rgba="{color}"/>
               <body name="{side}{key}lower" pos=".135 0 0" quat="{quat(lower-upper)}">
-                <joint name="{side}{key}knee" axis="0 1 0" damping=".008"/>
+                <joint name="{side}{key}knee" axis="0 1 0" damping=".008" limited="true" range="{knee_range}" margin=".01"/>
                 <geom type="capsule" fromto="0 0 0 .24 0 0" size=".009" mass=".1827" rgba="{color}"/>
                 <site name="{side}{key}tip" pos=".24 0 0" size=".003"/>{wheel}
               </body>
@@ -81,8 +118,8 @@ def xml(height=.18,terrain=True):
     </mujoco>'''
 
 
-def create(height=.18,terrain=True):
-    model=mujoco.MjModel.from_xml_string(xml(height,terrain))
+def create(height=.18,terrain=True,min_leg_height=.15,max_leg_height=.30):
+    model=mujoco.MjModel.from_xml_string(xml(height,terrain,min_leg_height,max_leg_height))
     # All terrain geoms collide; decorative parts and rods remain noncolliding.
     for name in ('launch_ramp','ramp_platform','single_step'):
         index=mujoco.mj_name2id(model,mujoco.mjtObj.mjOBJ_GEOM,name)
