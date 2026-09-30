@@ -45,6 +45,15 @@ def main():
         for _ in range(1500):limited.step(height=.33)
         assert np.isfinite(limited.data.qpos).all()
     finally:limited.firmware.close()
+    # Serial-leg mode is a real hip/knee open chain and uses the same virtual
+    # leg controller interface and six motor outputs as the generated C core.
+    serial=Arena(terrain=False,leg_topology='serial')
+    try:
+        for _ in range(3000):serial.step(height=.18)
+        assert np.isfinite(serial.data.qpos).all()
+        assert abs(serial.sensor[0])<.10 and serial.data.qpos[2]>.18
+        assert max(abs(serial.firmware.output[:2]))<=8 and max(abs(serial.firmware.output[2:]))<=35
+    finally:serial.firmware.close()
     results=[experiment('stand',3),experiment('ramp',12,.7,height=.26),experiment('step',10,.7,y=2.3,height=.26)]
     a=Arena();renderer=mujoco.Renderer(a.model,height=450,width=800)
     try:

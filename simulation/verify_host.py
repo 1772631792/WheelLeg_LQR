@@ -25,6 +25,23 @@ def main():
         for tab in app.pages.values():
             app.tabs.select(tab);root.update();app.render();root.update()
         assert '生产代码导出' in app.pages
+        app.show_robot_settings();root.update()
+        dialogs=[child for child in root.winfo_children() if isinstance(child,tk.Toplevel)]
+        assert dialogs and '机器人设置' in dialogs[-1].title();dialogs[-1].destroy();root.update()
+        app.apply_robot_settings(dict(app.robot_config,leg_topology='serial'))
+        assert app.production_panel.robot_config['leg_topology']=='serial'
+        assert '串联腿' in app.production_panel.topology.get()
+        assert '串联腿' in app.nav_buttons['二维机构'].cget('text')
+        assert '髋/膝' in app.guide.parameter('left_hip')[0]
+        app.tabs.select(app.pages['二维机构']);app.render();root.update()
+        assert all('serial leg' in ax.get_title() for ax in app.axes2)
+        app.tabs.select(app.pages['三维底盘']);app.render();root.update()
+        assert 'Serial-leg chassis' in app.axes3.get_title()
+        app.tabs.select(app.pages['参数导览']);root.update()
+        guide_text=[app.guide.canvas.itemcget(item,'text') for item in app.guide.canvas.find_all() if app.guide.canvas.type(item)=='text']
+        assert any('串联腿参数导览' in text for text in guide_text)
+        app.apply_robot_settings(dict(app.robot_config,leg_topology='five_bar'))
+        assert '五连杆' in app.nav_buttons['二维机构'].cget('text')
         production=app.production_panel;production.output.set(str(production_directory/'wheelleg_control'))
         production.start();deadline=time.perf_counter()+30
         while production.worker.is_alive() and time.perf_counter()<deadline:root.update();time.sleep(.01)
@@ -32,6 +49,12 @@ def main():
         assert not production.worker.is_alive()
         assert (production_directory/'wheelleg_control'/'manifest.json').exists()
         assert production.state.get()=='导出完成并通过独立编译/自测。'
+        production.output.set(str(production_directory/'selected_control'));production.start_both();deadline=time.perf_counter()+30
+        while production.worker.is_alive() and time.perf_counter()<deadline:root.update();time.sleep(.01)
+        while production.state.get().startswith('正在') and time.perf_counter()<deadline:root.update();time.sleep(.01)
+        assert (production_directory/'five_bar_control'/'manifest.json').exists()
+        assert (production_directory/'serial_leg_control'/'manifest.json').exists()
+        assert production.state.get()=='两套独立代码均已生成并通过自测。'
         app.seek('2.5');assert app.current==2.5
         app.toggle_play();deadline=time.perf_counter()+.2
         while time.perf_counter()<deadline:root.update();time.sleep(.01)
@@ -77,8 +100,24 @@ def main():
             app.guide.selected='pitch';app.guide.pinned=True
             app.tabs.select(app.pages['参数导览']);app.seek('0');root.update()
             ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'parameter_guide_ui.png')
+            app.apply_robot_settings(dict(app.robot_config,leg_topology='serial'));app.tabs.select(app.pages['二维机构']);app.render();root.update()
+            ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'serial_leg_2d_ui.png')
+            app.tabs.select(app.pages['参数导览']);app.render();root.update()
+            ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'serial_parameter_guide_ui.png')
+            app.apply_robot_settings(dict(app.robot_config,leg_topology='five_bar'))
             app.tabs.select(app.pages['C算法与增益']);app.refresh_matrix();root.update()
             ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'matrix_ui.png')
+            app.tabs.select(app.pages['仿真设置']);root.update()
+            ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'settings_ui.png')
+            app.tabs.select(app.pages['MuJoCo 实景']);root.update()
+            assert not app.arena_panel.advanced.winfo_manager()
+            ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'mujoco_ui.png')
+            app.arena_panel.toggle_advanced();root.update()
+            assert app.arena_panel.advanced.winfo_manager()
+            ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'mujoco_advanced_ui.png')
+            app.arena_panel.toggle_advanced();root.update()
+            app.tabs.select(app.pages['生产代码导出']);root.update()
+            ImageGrab.grab(window=hwnd).save(ROOT/'outputs'/'host_verified'/'production_ui.png')
             root.withdraw()
         previous=app.result
         app.fields['duration'].set('20');app.fields['physics_dt'].set('0.0001')
@@ -86,7 +125,7 @@ def main():
         deadline=time.perf_counter()+10
         while app.worker.is_alive() and time.perf_counter()<deadline:root.update();time.sleep(.01)
         root.update();assert not app.worker.is_alive();assert app.result is previous
-        print('PASS: Tk startup, worker, nine tabs, seek/play/loop/end, matrix-only clipboard,')
+        print('PASS: Tk startup, worker, nine sidebar pages, seek/play/loop/end, matrix-only clipboard,')
         print('      11 diagram hover/pin/curve links, data/code export and cancellation.')
     finally:
         app.close();shutil.rmtree(production_directory,ignore_errors=True)

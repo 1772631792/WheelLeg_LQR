@@ -2,7 +2,8 @@
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
-from simulation.robot_view import geometry
+from simulation.robot_view import geometry as five_bar_geometry
+from simulation.serial_leg_view import geometry as serial_geometry
 
 # (Chinese name, symbol, destination tab, subplot index, explanation)
 PARAMETERS = {
@@ -34,8 +35,9 @@ def signal_value(key, state, output):
 
 
 class ParameterGuide(ttk.Frame):
-    def __init__(self,parent,on_curve):
+    def __init__(self,parent,on_curve,robot_config=None):
         super().__init__(parent)
+        self.robot_config=robot_config or {'leg_topology':'five_bar'}
         self.on_curve=on_curve;self.selected='pitch';self.hovered=None;self.pinned=False
         self.state=np.array([0,0,np.deg2rad(10),0,.2,0,0,0,0,0.]);self.output=None;self.timestamp=None
         self.canvas=tk.Canvas(self,bg='#f4f7fb',highlightthickness=0,width=850,height=560)
@@ -56,25 +58,45 @@ class ParameterGuide(ttk.Frame):
         self.canvas.bind('<Button-1>',self.click);self.canvas.bind('<Double-Button-1>',self.double_click)
         self.update_detail();self.draw()
 
+    def parameter(self,key):
+        if self.robot_config.get('leg_topology')!='serial':return PARAMETERS[key]
+        replacements={
+            'left_height':('左串联腿有效长度','hL = h + 0.18*roll','腿长与电机',0,'左侧二连杆串联腿从髋关节到轮轴的有效长度，单位 m。'),
+            'right_height':('右串联腿有效长度','hR = h - 0.18*roll','腿长与电机',1,'右侧二连杆串联腿从髋关节到轮轴的有效长度，单位 m。'),
+            'left_hip':('左腿髋/膝关节电机','tau_LH / tau_LK','腿长与电机',4,'左串联腿 H/K 为髋、膝主动关节。曲线显示接口输出的两个关节转矩，便于替换为自己的 PID。'),
+            'right_hip':('右腿髋/膝关节电机','tau_RH / tau_RK','腿长与电机',5,'右串联腿 H/K 为髋、膝主动关节；qHip/qKnee 使用串联腿控制器的角度约定。'),
+        }
+        return replacements.get(key,PARAMETERS[key])
+
+    def leg_geometry(self,height):
+        if self.robot_config.get('leg_topology')=='serial':
+            return serial_geometry(0,self.state[2],height,self.robot_config.get('thigh_length_m',.135),self.robot_config.get('calf_length_m',.24))
+        return five_bar_geometry(0,self.state[2],height)
+
+    def set_robot_config(self,config):
+        self.robot_config=config
+        self.update_detail();self.draw()
+
     def set_sample(self,state,output=None,timestamp=None):
         self.state=np.asarray(state);self.output=output;self.timestamp=timestamp
         self.update_detail();self.draw()
         if self.hovered:self.tooltip.configure(text=self.tooltip_text(self.hovered))
 
     def tooltip_text(self,key):
-        name,symbol,tab,_,_=PARAMETERS[key]
+        name,symbol,tab,_,_=self.parameter(key)
         return f'{name} · {symbol}\n{signal_value(key,self.state,self.output)}\n曲线：{tab}（双击跳转）'
 
     def active(self): return self.selected if self.pinned else (self.hovered or self.selected)
 
     def update_detail(self):
-        key=self.active();name,symbol,tab,index,description=PARAMETERS[key]
+        key=self.active();name,symbol,tab,index,description=self.parameter(key)
         self.title.set(name+'\n'+symbol)
         value=signal_value(key,self.state,self.output)
         if key in ('left_hip','right_hip'):
             h=self.state[4]+(1 if key=='left_hip' else -1)*.18*self.state[6]
-            _,_,_,angles=geometry(0,self.state[2],h)
-            value+=f'\nqA={np.rad2deg(angles[0]):.2f}°\nqE={np.rad2deg(angles[1]):.2f}°'
+            _,_,_,angles=self.leg_geometry(h)
+            labels=('qHip','qKnee') if self.robot_config.get('leg_topology')=='serial' else ('qA','qE')
+            value+=f'\n{labels[0]}={np.rad2deg(angles[0]):.2f}°\n{labels[1]}={np.rad2deg(angles[1]):.2f}°'
         self.value.set(value if self.timestamp is not None else '示意姿态（尚未计算）\n'+value)
         self.detail.set(description);self.destination.set(f'对应：{tab}\n第 {index+1} 张子图\n'+('已固定选择' if self.pinned else '悬停预览'))
 
@@ -109,7 +131,7 @@ class ParameterGuide(ttk.Frame):
     def unpin(self):self.pinned=False;self.update_detail();self.draw()
 
     def jump(self):
-        key=self.active();_,_,tab,index,_=PARAMETERS[key];self.on_curve(tab,index,key)
+        key=self.active();_,_,tab,index,_=self.parameter(key);self.on_curve(tab,index,key)
 
     def draw(self):
         c=self.canvas;c.delete('all');w=max(c.winfo_width(),720);h=max(c.winfo_height(),480)
@@ -121,19 +143,22 @@ class ParameterGuide(ttk.Frame):
         def color(key,normal):return '#b64074' if self.active()==key else normal
         def line(points,key,normal,width=4,**kwargs):
             return c.create_line(*np.asarray(points).ravel(),fill=color(key,normal),width=width,tags=tags(key),**kwargs)
-        # Body and both five-bars use current pitch/roll/height. Fixed oblique view,
+        # Body and the selected leg renderer use current pitch/roll/height.
         # yaw is an explanatory ground arrow so left/right labels stay readable.
         anchors={};s=self.state
         for side,y,key in [('右',-.18,'right_height'),('左',.18,'left_height')]:
-            pts,body,com,angles=geometry(0,s[2],s[4]+y*s[6]);q=project(pts,y)
+            pts,body,com,angles=self.leg_geometry(s[4]+y*s[6]);q=project(pts,y)
             hipkey='left_hip' if y>0 else 'right_hip'
-            anchors[key]=(q[0]+q[4]+2*q[2])/4;anchors[hipkey]=(q[0]+q[4])/2
-            for ids in ([0,1,2],[4,3,2]):line(q[ids],key,'#168aad' if y>0 else '#eb8c3d',5)
-            line(q[[0,4]],hipkey,'#526477',5)
+            serial=self.robot_config.get('leg_topology')=='serial'
+            anchors[key]=(q[0]+q[2])/2 if serial else (q[0]+q[4]+2*q[2])/4
+            anchors[hipkey]=(q[0]+q[1])/2 if serial else (q[0]+q[4])/2
+            segments=([0,1,2],) if serial else ([0,1,2],[4,3,2])
+            for ids in segments:line(q[list(ids)],key,'#168aad' if y>0 else '#eb8c3d',5)
+            if not serial:line(q[[0,4]],hipkey,'#526477',5)
             for i,point in enumerate(q):
-                target=hipkey if i in (0,4) else key
+                target=hipkey if i in ((0,1) if serial else (0,4)) else key
                 c.create_oval(point[0]-4,point[1]-4,point[0]+4,point[1]+4,fill=color(target,'#526477'),outline='',tags=tags(target))
-                if i!=2:c.create_text(point[0]+9,point[1]-12,text='ABCDE'[i],fill='#34475b',font=('Consolas',10,'bold'),tags=tags(target))
+                if i!=2:c.create_text(point[0]+9,point[1]-12,text=('HKW' if serial else 'ABCDE')[i],fill='#34475b',font=('Consolas',10,'bold'),tags=tags(target))
             wheel=project(np.column_stack([.06*np.cos(np.linspace(0,2*np.pi,48)),.06+.06*np.sin(np.linspace(0,2*np.pi,48))]),y)
             c.create_polygon(*wheel.ravel(),fill='#dbe5ef',outline=color('wheels','#283c51'),width=6,tags=tags('wheels'))
             line([q[2],q[2]+[scale*.045,0]],'wheels','#526477',3)
@@ -141,10 +166,11 @@ class ParameterGuide(ttk.Frame):
             c.create_text(q[2][0],q[2][1]+scale*.08,text=side+'轮 / '+side+'腿',font=('Microsoft YaHei UI',10,'bold'),fill='#34475b',tags=tags(key))
         vertices=[]
         for y in (-.13,.13):
-            _,body,_,_=geometry(0,s[2],s[4]+y*s[6]);vertices.extend(project(body,y))
+            _,body,_,_=self.leg_geometry(s[4]+y*s[6]);vertices.extend(project(body,y))
         vertices=np.array(vertices)
         for face in ([0,1,2,3],[3,2,6,7],[1,5,6,2]):
-            c.create_polygon(*vertices[face].ravel(),fill='#dce8f2',outline=color('pitch','#526477'),width=2,tags=tags('pitch'))
+            c.create_polygon(*vertices[face].ravel(),fill='#dce8f2',outline=color('pitch','#526477'),width=2,tags=tags('pitch')+('chassis',))
+        c.tag_lower('chassis')
         center=vertices.mean(axis=0);anchors['pitch']=center;anchors['roll']=(vertices[2]+vertices[6])/2
         line([center,center+[0,-scale*.12]],'pitch','#7d91a6',1,dash=(4,3))
         theta=s[2];axis=np.array([np.sin(theta),-np.cos(theta)])*scale*.12
@@ -159,7 +185,8 @@ class ParameterGuide(ttk.Frame):
         angles=np.linspace(-.3,.9,25);yawarc=np.column_stack([cx+scale*.12*np.cos(angles),ground_y+scale*.045*np.sin(angles)])
         line(yawarc,'yaw','#6c6eb2',2,arrow='last');anchors['yaw']=yawarc[-1]
         anchors['wheels']=project([[0,.06]],-.18)[0];anchors['support']=project([[0,.13]],.18)[0]
-        c.create_text(w/2,25,text='五连杆参数导览 · 固定斜视',font=('Microsoft YaHei UI',15,'bold'),fill='#233a51')
+        title='串联腿参数导览' if self.robot_config.get('leg_topology')=='serial' else '五连杆参数导览'
+        c.create_text(w/2,25,text=title+' · 固定斜视',font=('Microsoft YaHei UI',15,'bold'),fill='#233a51')
         c.create_text(w/2,51,text='悬停看说明  ·  单击固定  ·  双击定位曲线',font=('Microsoft YaHei UI',10),fill='#6c7d90')
         self.label_centers={}
         left=['pitch','roll','right_hip','right_height','wheels','pos']
@@ -169,7 +196,7 @@ class ParameterGuide(ttk.Frame):
                 yy=100+i*(h-155)/max(len(keys)-1,1)
                 target=anchors[key];endx=x+145 if anchor=='w' else x-145
                 line([target,[endx,yy],[x+(4 if anchor=='w' else -4),yy]],key,'#a4b2c1',1)
-                label=PARAMETERS[key][0]
+                label=self.parameter(key)[0]
                 item=c.create_text(x,yy-9,text=label,anchor=anchor,font=('Microsoft YaHei UI',10,'bold'),fill=color(key,'#294762'),tags=tags(key))
-                c.create_text(x,yy+9,text=PARAMETERS[key][1],anchor=anchor,font=('Consolas',9),fill='#71849a',tags=tags(key))
+                c.create_text(x,yy+9,text=self.parameter(key)[1],anchor=anchor,font=('Consolas',9),fill='#71849a',tags=tags(key))
                 bounds=c.bbox(item);self.label_centers[key]=((bounds[0]+bounds[2])/2,(bounds[1]+bounds[3])/2)

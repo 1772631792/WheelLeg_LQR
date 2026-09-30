@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define WLC_API_VERSION 1u
+#define WLC_API_VERSION 2u
 #define WLC_LEG_COUNT 2u
 #define WLC_JOINT_COUNT 4u
 #define WLC_MOTOR_COUNT 6u

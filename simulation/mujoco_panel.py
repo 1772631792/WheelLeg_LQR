@@ -11,8 +11,9 @@ from simulation.chassis_sim import ROOT
 
 
 class MuJoCoPanel(ttk.Frame):
-    def __init__(self,parent):
+    def __init__(self,parent,robot_config=None):
         super().__init__(parent)
+        self.robot_config=robot_config or {}
         self.worker=None;self.closed=False;self.stop=threading.Event()
         self.commands=queue.SimpleQueue();self.events=queue.SimpleQueue();self.frames=queue.Queue(1)
         self.keys=set();self.active=False;self.high=False;self.fast=False
@@ -21,34 +22,42 @@ class MuJoCoPanel(ttk.Frame):
         self.stability_assist=tk.BooleanVar(value=True)
         self.scene=tk.StringVar(value='飞坡');self.duration=tk.StringVar(value='12')
         self.substeps=tk.StringVar(value='1');self.resolution=tk.StringVar(value='960x540')
-        self.min_leg_height=tk.StringVar(value='0.15');self.max_leg_height=tk.StringVar(value='0.30')
-        self.note=tk.StringVar(value='源代码控制器 · 1 kHz · 六电机 · 真正五连杆闭链与接触动力学。点击进入操控模式。')
-        row=ttk.Frame(self);row.pack(fill='x')
-        ttk.Button(row,text='进入操控 / R 重置',command=self.start_live).pack(side='left')
-        ttk.Button(row,text='停止并保存记录',command=self.halt).pack(side='left',padx=4)
-        ttk.Combobox(row,textvariable=self.scene,values=['飞坡','一级台阶','平地'],state='readonly',width=9).pack(side='left')
-        ttk.Label(row,text='预计算秒数').pack(side='left',padx=(10,0))
-        ttk.Entry(row,textvariable=self.duration,width=5).pack(side='left')
-        ttk.Button(row,text='预计算直行',command=lambda:self.start_run('batch')).pack(side='left',padx=4)
-        ttk.Button(row,text='播放记录',command=lambda:self.start_run('replay')).pack(side='left')
-        ttk.Checkbutton(row,text='循环',variable=self.loop,command=self.send).pack(side='left')
-        ttk.Button(row,text='全图 / 跟随',command=self.toggle_camera).pack(side='left')
-        ttk.Button(row,text='导出记录',command=self.export).pack(side='right')
-        quality=ttk.Frame(self);quality.pack(fill='x',pady=(4,0))
-        ttk.Label(quality,text='控制固定 1 ms / 物理子步数').pack(side='left')
-        ttk.Combobox(quality,textvariable=self.substeps,values=['1','2','4'],state='readonly',width=4).pack(side='left',padx=4)
-        ttk.Label(quality,text='渲染分辨率').pack(side='left',padx=(12,0))
-        ttk.Combobox(quality,textvariable=self.resolution,values=['800x450','960x540','1280x720'],state='readonly',width=10).pack(side='left',padx=4)
-        ttk.Label(quality,text='下次启动生效；实时记录最多 120 s。').pack(side='left',padx=10)
-        limits=ttk.Frame(self);limits.pack(fill='x',pady=(4,0))
-        ttk.Label(limits,text='腿部机械限位（有效腿长） 最短').pack(side='left')
-        ttk.Entry(limits,textvariable=self.min_leg_height,width=6).pack(side='left',padx=3)
-        ttk.Label(limits,text='m  最长').pack(side='left')
-        ttk.Entry(limits,textvariable=self.max_leg_height,width=6).pack(side='left',padx=3)
-        ttk.Label(limits,text='m').pack(side='left')
-        ttk.Checkbutton(limits,text='防翻车辅助（倾斜降速 / 高速转向抑制）',variable=self.stability_assist).pack(side='left',padx=14)
-        ttk.Label(limits,text='限位范围 0.14–0.33 m，下次启动生效').pack(side='left')
-        ttk.Label(self,text='W/S 前后 · A/D 转向 · C 高低腿 · G 快慢 · Shift 收放腿越阶 · Ctrl+C 零力 · Esc 退出控制\n右键拖动第三人称相机 / 滚轮缩放。飞坡高 32 cm，另一车道为 4 cm 台阶；预计算使用高腿、0.7 m/s。').pack(anchor='w',pady=5)
+        self.min_leg_height=tk.StringVar(value=str(self.robot_config.get('min_leg_length_m',.15)));self.max_leg_height=tk.StringVar(value=str(self.robot_config.get('max_leg_length_m',.30)))
+        self.note=tk.StringVar(value='源代码控制器 · 1 kHz · 六电机 · 刚体接触动力学。点击进入操控模式。')
+        heading=ttk.Frame(self);heading.pack(fill='x',pady=(2,8))
+        ttk.Label(heading,text='MuJoCo 实景',style='Title.TLabel').pack(side='left')
+        ttk.Label(heading,text='刚体接触 · C 控制器 · 1 kHz',style='Secondary.TLabel').pack(side='left',padx=12)
+        self.toolbar=ttk.Frame(self,style='Surface.TFrame',padding=(10,8));self.toolbar.pack(fill='x',pady=(0,8))
+        ttk.Button(self.toolbar,text='▶  进入操控',style='Primary.TButton',command=self.start_live).pack(side='left')
+        ttk.Button(self.toolbar,text='停止',style='Danger.TButton',command=self.halt).pack(side='left',padx=(7,12))
+        ttk.Label(self.toolbar,text='场景').pack(side='left')
+        ttk.Combobox(self.toolbar,textvariable=self.scene,values=['飞坡','一级台阶','平地'],state='readonly',width=8).pack(side='left',padx=(5,10))
+        ttk.Button(self.toolbar,text='预计算',style='Compact.TButton',command=lambda:self.start_run('batch')).pack(side='left')
+        ttk.Button(self.toolbar,text='回放',style='Compact.TButton',command=lambda:self.start_run('replay')).pack(side='left',padx=5)
+        ttk.Checkbutton(self.toolbar,text='循环',variable=self.loop,command=self.send).pack(side='left')
+        ttk.Button(self.toolbar,text='全图 / 跟随',style='Compact.TButton',command=self.toggle_camera).pack(side='left',padx=5)
+        ttk.Button(self.toolbar,text='导出',style='Compact.TButton',command=self.export).pack(side='right')
+        self.advanced_button=ttk.Button(self.toolbar,text='调整参数  ▾',style='Compact.TButton',command=self.toggle_advanced)
+        self.advanced_button.pack(side='right',padx=5)
+        self.advanced_visible=False
+        self.advanced=ttk.Frame(self,style='Surface.TFrame',padding=(12,9))
+        self.advanced.columnconfigure(9,weight=1)
+        ttk.Label(self.advanced,text='预计算').grid(row=0,column=0,sticky='w')
+        ttk.Entry(self.advanced,textvariable=self.duration,width=5).grid(row=0,column=1,padx=(5,2))
+        ttk.Label(self.advanced,text='s').grid(row=0,column=2,sticky='w')
+        ttk.Label(self.advanced,text='物理子步').grid(row=0,column=3,padx=(18,0))
+        ttk.Combobox(self.advanced,textvariable=self.substeps,values=['1','2','4'],state='readonly',width=3).grid(row=0,column=4,padx=5)
+        ttk.Label(self.advanced,text='画面').grid(row=0,column=5,padx=(15,0))
+        ttk.Combobox(self.advanced,textvariable=self.resolution,values=['800x450','960x540','1280x720'],state='readonly',width=9).grid(row=0,column=6,padx=5)
+        self.topology_text=tk.StringVar();ttk.Label(self.advanced,textvariable=self.topology_text,style='Secondary.TLabel').grid(row=0,column=7,padx=(16,0),sticky='w')
+        ttk.Label(self.advanced,text='腿长限位').grid(row=1,column=0,sticky='w',pady=(8,0))
+        ttk.Entry(self.advanced,textvariable=self.min_leg_height,width=6).grid(row=1,column=1,padx=(5,2),pady=(8,0))
+        ttk.Label(self.advanced,text='—').grid(row=1,column=2,pady=(8,0))
+        ttk.Entry(self.advanced,textvariable=self.max_leg_height,width=6).grid(row=1,column=3,padx=5,pady=(8,0),sticky='w')
+        ttk.Label(self.advanced,text='m').grid(row=1,column=4,sticky='w',pady=(8,0))
+        ttk.Checkbutton(self.advanced,text='防翻车辅助',variable=self.stability_assist).grid(row=1,column=5,columnspan=2,padx=(15,0),pady=(8,0),sticky='w')
+        ttk.Label(self.advanced,text='W/S 前后 · A/D 转向 · C 高低腿 · G 快慢 · Shift 越阶 · Ctrl+C 零力 · 右键旋转 · 滚轮缩放',style='Secondary.TLabel').grid(row=2,column=0,columnspan=10,sticky='w',pady=(8,0))
+        self.apply_robot_config(self.robot_config)
         book=ttk.Notebook(self);book.pack(fill='both',expand=True)
         view=ttk.Frame(book);book.add(view,text='第三人称地图')
         self.screen=tk.Label(view,bg='#17232e',fg='#c8dce8',text='MuJoCo 五连杆试验场\n\n启动后显示物理渲染画面',takefocus=True,width=1,height=1)
@@ -81,11 +90,20 @@ class MuJoCoPanel(ttk.Frame):
         ttk.Label(design,textvariable=self.design_note).pack(anchor='w',pady=4)
         self.text=tk.Text(design,font=('Consolas',10),wrap='none');self.text.pack(fill='both',expand=True)
         self.text.insert('end','点击重算生成 design.json 与 regenerated_gains.h。\n使用连续代价精确离散化（含交叉项 N），与参考 GenerateGains.m 对齐。');self.text.configure(state='disabled')
-        ttk.Label(self,textvariable=self.note).pack(anchor='w',pady=5)
+        ttk.Label(self,textvariable=self.note,style='Secondary.TLabel').pack(anchor='w',pady=5)
         self.after(30,self.poll)
 
     def send(self):
         self.commands.put(dict(keys=set(self.keys),high=self.high,fast=self.fast,camera=list(self.camera),loop=self.loop.get(),overview=self.overview))
+
+    def toggle_advanced(self):
+        self.advanced_visible=not self.advanced_visible
+        if self.advanced_visible:
+            self.advanced.pack(fill='x',after=self.toolbar,pady=(0,8))
+            self.advanced_button.configure(text='收起参数  ▴')
+        else:
+            self.advanced.pack_forget()
+            self.advanced_button.configure(text='调整参数  ▾')
 
     def toggle_camera(self):self.overview=not self.overview;self.send()
 
@@ -119,6 +137,14 @@ class MuJoCoPanel(ttk.Frame):
         self.camera[2]=float(np.clip(self.camera[2]*(.9 if event.delta>0 else 1.1),.6,12));self.send()
 
     def halt(self):self.active=False;self.release();self.stop.set()
+    def apply_robot_config(self,config):
+        self.robot_config=config
+        self.min_leg_height.set(str(config.get('min_leg_length_m',.15)));self.max_leg_height.set(str(config.get('max_leg_length_m',.30)))
+        if hasattr(self,'topology_text'):
+            name='串联腿' if config.get('leg_topology')=='serial' else '五连杆'
+            self.topology_text.set(f'{name} · 下次启动生效')
+            if hasattr(self,'screen') and not str(self.screen.cget('image')):
+                self.screen.configure(text=f'MuJoCo {name}试验场\n\n启动后显示物理渲染画面')
     def start_live(self):self.start_run('live')
     def start_run(self,mode):
         if self.worker and self.worker.is_alive():
@@ -128,7 +154,7 @@ class MuJoCoPanel(ttk.Frame):
             duration=float(self.duration.get())
             if not np.isfinite(duration) or not .1<=duration<=120:raise ValueError('时间范围为 0.1–120 秒')
             min_leg_height=float(self.min_leg_height.get());max_leg_height=float(self.max_leg_height.get())
-            if not .14<=min_leg_height<max_leg_height<=.33:raise ValueError('腿部限位需满足 0.14 <= 最短 < 最长 <= 0.33 m')
+            if not .09<=min_leg_height<max_leg_height<=.39:raise ValueError('腿部限位需满足 0.09 <= 最短 < 最长 <= 0.39 m')
             initial_height=self.run['initial_height'] if mode=='replay' and self.run is not None else (.26 if mode=='batch' else .18)
             if not min_leg_height<=initial_height<=max_leg_height:raise ValueError(f'初始腿长 {initial_height:.2f} m 必须位于机械限位内')
             if self.use_generated.get() and self.report is None:raise ValueError('请先重算参数')
@@ -138,7 +164,11 @@ class MuJoCoPanel(ttk.Frame):
         while not self.commands.empty():self.commands.get()
         options=dict(mode=mode,duration=duration,scene=self.scene.get(),report=self.report if self.use_generated.get() else None,run=self.run,
                      substeps=int(self.substeps.get()),resolution=tuple(map(int,self.resolution.get().split('x'))),
-                     min_leg_height=min_leg_height,max_leg_height=max_leg_height,stability_assist=self.stability_assist.get())
+                     min_leg_height=min_leg_height,max_leg_height=max_leg_height,stability_assist=self.stability_assist.get(),
+                     leg_topology=self.robot_config.get('leg_topology','five_bar'),thigh_length=self.robot_config.get('thigh_length_m',.135),
+                     calf_length=self.robot_config.get('calf_length_m',.24),joint_distance=self.robot_config.get('joint_distance_m',.12),
+                     wheel_distance=self.robot_config.get('wheel_distance_m',.52),wheel_torque_limit=self.robot_config.get('wheel_torque_limit_nm',8.),
+                     joint_torque_limit=self.robot_config.get('joint_torque_limit_nm',35.))
         self.send();self.worker=threading.Thread(target=self.simulate,args=(options,self.stop),daemon=True);self.worker.start()
         self.screen.focus_set();self.note.set('正在初始化 MuJoCo / OpenGL…')
 
@@ -148,7 +178,9 @@ class MuJoCoPanel(ttk.Frame):
             from simulation.mujoco_engine import Arena,mujoco
             initial_height=options['run']['initial_height'] if options['mode']=='replay' else (.26 if options['mode']=='batch' else .18)
             arena=Arena(height=initial_height,terrain=True,substeps=options['substeps'],min_leg_height=options['min_leg_height'],
-                        max_leg_height=options['max_leg_height'],stability_assist=options['stability_assist'])
+                        max_leg_height=options['max_leg_height'],stability_assist=options['stability_assist'],leg_topology=options['leg_topology'],
+                        thigh_length=options['thigh_length'],calf_length=options['calf_length'],joint_distance=options['joint_distance'],wheel_distance=options['wheel_distance'],
+                        wheel_torque_limit=options['wheel_torque_limit'],joint_torque_limit=options['joint_torque_limit'])
             if options['scene']=='一级台阶':arena.data.qpos[1]=2.3
             if options['scene']=='平地':arena.data.qpos[1]=-2.3
             mujoco.mj_forward(arena.model,arena.data)
@@ -205,6 +237,7 @@ class MuJoCoPanel(ttk.Frame):
             if records:self.events.put(('run',dict(records=np.array(records),qpos=np.array(positions),scene=options['scene'],dt=.001,
                                                   initial_height=initial_height,substeps=options['substeps'],min_leg_height=options['min_leg_height'],
                                                   max_leg_height=options['max_leg_height'],stability_assist=options['stability_assist'],
+                                                  leg_topology=options['leg_topology'],thigh_length_m=options['thigh_length'],calf_length_m=options['calf_length'],
                                                   gain_source='regenerated' if options['report'] else 'original')))
             if renderer is not None:renderer.close()
             if arena is not None:arena.firmware.close()

@@ -27,7 +27,7 @@ DEFAULT_MPC=np.array([
 [3.366239,-5.444027,2.880210,-.078041],[-10.879463,-17.219974,21.690707,-.201016]])
 DEFAULT_PARAMETERS=dict(sample_time_s=.001,thigh_length_m=.135,calf_length_m=.24,joint_distance_m=.12,wheel_distance_m=.52,
                         body_mass_kg=7.645,max_acceleration_m_s2=2.5,airborne_force_n=20.,wheel_torque_limit_nm=8.,
-                        joint_torque_limit_nm=35.,min_leg_length_m=.15,max_leg_length_m=.33)
+                        joint_torque_limit_nm=35.,min_leg_length_m=.15,max_leg_length_m=.33,leg_topology=0)
 
 
 def _identifier(text):
@@ -84,8 +84,7 @@ int main(void) {
     int tick,motor;ExternalPID external_pid;wheel_leg_initialize();
     assert(wheel_leg_bind_pid(0u,&external_pid,external_pid_calculate,external_pid_reset)==0);
     assert(wheel_leg_call_pid(0u,2.0f,5.0f)==3.0f&&external_pid.calls==1);
-    wheel_leg_U.joint_angle_rad[0]=wheel_leg_U.joint_angle_rad[2]=2.8857736f;
-    wheel_leg_U.joint_angle_rad[1]=wheel_leg_U.joint_angle_rad[3]=0.2558225f;
+    @JOINT_INITIALIZATION@
     wheel_leg_U.normal_force_n[0]=wheel_leg_U.normal_force_n[1]=80.0f;
     wheel_leg_U.leg_length_command_m=.18f;
     for(tick=0;tick<3000;++tick) {
@@ -171,7 +170,8 @@ INTEGRATION_GUIDE_CN='''# 轮腿控制生成代码接入与自定义 PID 指南
 | `include/wheel_leg_pid_interface.h` | 外部 PID 函数签名，不包含 PID 算法 | 否 |
 | `src/wheel_leg.c` | `initialize/step/terminate` 顶层调度 | 否 |
 | `src/wheel_leg_user.c` | 用户控制插入点 | 可以，重复导出会保留 |
-| `src/wlc_internal.c` | 五连杆、LQR/VMC、状态机数值核心 | 不建议修改 |
+| `src/wlc_internal.c` | 当前腿型的 LQR/VMC 与状态机数值核心 | 不建议修改 |
+| `src/wlc_kinematics.h` | 当前腿型独立运动学；包内只有这一份实现 | 不建议修改 |
 | `generated/wlc_generated_params.h` | UI 生成的质量、几何、限幅和增益 | 不要手改，重新导出 |
 
 ## 2. 最小调用顺序
@@ -243,6 +243,8 @@ wheel_leg_terminate();
 ```
 
 ## 3. 六路力矩映射
+
+本包是 **@LEG_VARIANT@** 独立版本，只包含这一种腿型的运动学和 VMC，不包含另一腿型的分支或代码。对外仍保持左右轮与四个关节的六路力矩接口。
 
 | 生成代码输出 | 含义 | 单位 |
 |---|---|---:|
@@ -458,7 +460,12 @@ def export_package(directory,profile='wheelleg-reference',lqr=None,mpc=None,samp
     directory=Path(directory).resolve();profile=_identifier(profile)
     values=dict(DEFAULT_PARAMETERS);values['sample_time_s']=sample_time
     if parameters:values.update(parameters)
-    if not all(np.isfinite(v) and v>0 for v in values.values()):raise ValueError('生产参数必须全部为有限正数')
+    numeric=[v for key,v in values.items() if key!='leg_topology']
+    if not all(np.isfinite(v) and v>0 for v in numeric):raise ValueError('生产参数必须全部为有限正数')
+    if int(values['leg_topology']) not in (0,1):raise ValueError('腿型必须是五连杆(0)或串联腿(1)')
+    serial=int(values['leg_topology'])==1
+    variant='serial_leg' if serial else 'five_bar'
+    variant_cn='二关节串联腿' if serial else '并联五连杆'
     if not .0001<=values['sample_time_s']<=.01:raise ValueError('控制周期必须在 0.0001–0.01 s')
     if not .09<=values['min_leg_length_m']<values['max_leg_length_m']<=.39:raise ValueError('腿长需满足 0.09 <= 最短 < 最长 <= 0.39 m')
     lqr=np.asarray(DEFAULT_LQR if lqr is None else lqr,dtype=float);mpc=np.asarray(DEFAULT_MPC if mpc is None else mpc,dtype=float)
@@ -472,6 +479,7 @@ def export_package(directory,profile='wheelleg-reference',lqr=None,mpc=None,samp
         if legacy.exists():legacy.unlink()
     shutil.copy2(ROOT/'portable_control'/'wlc.h',directory/'include'/'wlc.h')
     shutil.copy2(ROOT/'portable_control'/'wlc.c',directory/'src'/'wlc_internal.c')
+    shutil.copy2(ROOT/'portable_control'/'kinematics'/('serial_leg.h' if serial else 'five_bar.h'),directory/'src'/'wlc_kinematics.h')
     for source in (ROOT/'portable_control'/'model').iterdir():
         target=directory/('include' if source.suffix=='.h' else 'src')/source.name
         preserved=source.name in ('wheel_leg_user.c','wheel_leg_user_types.h')
@@ -483,14 +491,18 @@ def export_package(directory,profile='wheelleg-reference',lqr=None,mpc=None,samp
             if legacy_user:shutil.copy2(target,target.with_suffix(target.suffix+'.pre_pid_interface.bak'))
         if not preserved or not target.exists() or legacy_user:shutil.copy2(source,target)
     (directory/'generated'/'wlc_generated_params.h').write_text(generated_header(profile,lqr,mpc,values),encoding='utf-8')
-    (directory/'tests'/'test_runner.c').write_text(TEST_RUNNER,encoding='utf-8')
+    joints=('wheel_leg_U.joint_angle_rad[0]=wheel_leg_U.joint_angle_rad[2]=-1.7148122f;\n'
+            '    wheel_leg_U.joint_angle_rad[1]=wheel_leg_U.joint_angle_rad[3]=2.3051922f;' if serial else
+            'wheel_leg_U.joint_angle_rad[0]=wheel_leg_U.joint_angle_rad[2]=2.8857736f;\n'
+            '    wheel_leg_U.joint_angle_rad[1]=wheel_leg_U.joint_angle_rad[3]=0.2558225f;')
+    (directory/'tests'/'test_runner.c').write_text(TEST_RUNNER.replace('@JOINT_INITIALIZATION@',joints),encoding='utf-8')
     (directory/'examples'/'baremetal_adapter.c').write_text(BAREMETAL,encoding='utf-8')
     (directory/'examples'/'freertos_adapter.c').write_text(FREERTOS,encoding='utf-8')
     (directory/'README.md').write_text(README,encoding='utf-8')
-    (directory/'INTEGRATION_GUIDE_CN.md').write_text(INTEGRATION_GUIDE_CN,encoding='utf-8')
+    (directory/'INTEGRATION_GUIDE_CN.md').write_text(INTEGRATION_GUIDE_CN.replace('@LEG_VARIANT@',variant_cn),encoding='utf-8')
     (directory/'CMakeLists.txt').write_text(CMAKE,encoding='utf-8')
     shutil.copy2(ROOT/'balance_chassis-main'/'LICENSE',directory/'LICENSES'/'NeoZng-MIT.txt')
-    sources=list((directory/'include').glob('*.h'))+list((directory/'src').glob('*.c'))+[directory/'generated'/'wlc_generated_params.h']
+    sources=list((directory/'include').glob('*.h'))+list((directory/'src').glob('*.[ch]'))+[directory/'generated'/'wlc_generated_params.h']
     _audit(sources)
     compiler_path=shutil.which(compiler)
     if not compiler_path:raise RuntimeError(f'找不到 C 编译器：{compiler}')
@@ -506,7 +518,7 @@ def export_package(directory,profile='wheelleg-reference',lqr=None,mpc=None,samp
                        directory/'tests'/'test_runner.c',directory/'examples'/'baremetal_adapter.c',directory/'examples'/'freertos_adapter.c']
     hashes={str(p.relative_to(directory)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in artifacts}
     parameter_bytes=(directory/'generated'/'wlc_generated_params.h').read_bytes()
-    manifest=dict(schema_version=1,api_version=1,profile=profile,generated_at=datetime.now(timezone.utc).isoformat(),sample_time_s=values['sample_time_s'],parameters=values,
+    manifest=dict(schema_version=3,api_version=2,profile=profile,leg_variant=variant,generated_at=datetime.now(timezone.utc).isoformat(),sample_time_s=values['sample_time_s'],parameters=values,
                   float_format='IEEE-754 float32',dynamic_allocation=False,external_runtime_dependencies=[],parameter_sha256=hashlib.sha256(parameter_bytes).hexdigest(),
                   compiler=compiler_path,self_test=tested.stdout.strip(),files=hashes)
     (directory/'manifest.json').write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding='utf-8')

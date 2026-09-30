@@ -28,6 +28,15 @@ def main():
     try:
         manifest=export_package(directory/'package','verification')
         package=directory/'package';compiler=manifest['compiler'];dll=package/'build'/'wlc_verify.dll'
+        serial_manifest=export_package(directory/'package_serial','verification-serial',parameters={'leg_topology':1})
+        serial_package=directory/'package_serial'
+        assert manifest['leg_variant']=='five_bar' and serial_manifest['leg_variant']=='serial_leg'
+        five_kin=(package/'src'/'wlc_kinematics.h').read_text(encoding='utf-8')
+        serial_kin=(serial_package/'src'/'wlc_kinematics.h').read_text(encoding='utf-8')
+        assert 'five-bar' in five_kin and 'serial' not in five_kin and 'q12' not in five_kin
+        assert 'serial-leg' in serial_kin and 'five-bar' not in serial_kin and 's32' not in serial_kin
+        assert 'leg_topology' not in (package/'src'/'wlc_internal.c').read_text(encoding='utf-8')
+        assert 'leg_topology' not in (serial_package/'src'/'wlc_internal.c').read_text(encoding='utf-8')
         guide=(package/'INTEGRATION_GUIDE_CN.md').read_text(encoding='utf-8')
         assert 'wheel_leg_step()' in guide and 'WheelLeg_UserAfterControl' in guide and 'Motor_SetTorqueNm' in guide and 'wheel_leg_bind_pid' in guide
         user_source=package/'src'/'wheel_leg_user.c';user_source.write_text(user_source.read_text(encoding='utf-8')+'\n/* PRESERVE_USER_PID */\n',encoding='utf-8')

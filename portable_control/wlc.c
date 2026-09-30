@@ -32,7 +32,9 @@ static int finite_array(const float *values, size_t count)
 
 static int valid_config(const WlcConfig *c)
 {
-    if (!c || !finite_array((const float *)c, sizeof(*c) / sizeof(float))) return 0;
+    if (!c || !finite_array(&c->sample_time_s,12u) ||
+        !finite_array(&c->lqr_coefficients[0][0],48u) ||
+        !finite_array(&c->mpc_coefficients[0][0],48u)) return 0;
     if (c->sample_time_s < 0.0001f || c->sample_time_s > 0.01f) return 0;
     if (c->thigh_length_m <= 0.0f || c->calf_length_m <= 0.0f ||
         c->joint_distance_m <= 0.0f || c->wheel_distance_m <= 0.0f ||
@@ -113,47 +115,7 @@ void Wlc_Reset(WlcContext *ctx, const WlcInput *initial)
     ctx->initialized = 1u;
 }
 
-static int link_to_leg(float *p, const WlcConfig *c, float pitch, float pitch_rate)
-{
-    float x_d, y_d, x_b, y_b, bd, a0, b0, root, x_c, y_c;
-    float x_rel, sin32, sin12, sin34, sin03, cos03, sin02, cos02;
-    float inv_sin32, inv_length;
-    x_d = c->joint_distance_m + c->thigh_length_m * cosf(p[PHI4]);
-    y_d = c->thigh_length_m * sinf(p[PHI4]);
-    x_b = c->thigh_length_m * cosf(p[PHI1]);
-    y_b = c->thigh_length_m * sinf(p[PHI1]);
-    bd = (x_d-x_b)*(x_d-x_b) + (y_d-y_b)*(y_d-y_b);
-    a0 = 2.0f*c->calf_length_m*(x_d-x_b);
-    b0 = 2.0f*c->calf_length_m*(y_d-y_b);
-    root = a0*a0 + b0*b0 - bd*bd;
-    if (root <= 1.0e-12f) return -1;
-    p[PHI2] = 2.0f*atan2f(b0+sqrtf(root), a0+bd);
-    x_c = x_b + c->calf_length_m*cosf(p[PHI2]);
-    y_c = y_b + c->calf_length_m*sinf(p[PHI2]);
-    p[PHI3] = atan2f(y_c-y_d, x_c-x_d);
-    x_rel = x_c-c->joint_distance_m*0.5f;
-    p[PHI0] = atan2f(y_c,x_rel);
-    p[LEG_LENGTH] = sqrtf(x_rel*x_rel+y_c*y_c);
-    if (p[LEG_LENGTH] < 0.09f) return -1;
-    p[THETA] = p[PHI0]-0.5f*WLC_PI-pitch;
-    sin32=sinf(p[PHI3]-p[PHI2]);sin12=sinf(p[PHI1]-p[PHI2]);sin34=sinf(p[PHI3]-p[PHI4]);
-    sin03=sinf(p[PHI0]-p[PHI3]);cos03=cosf(p[PHI0]-p[PHI3]);
-    sin02=sinf(p[PHI0]-p[PHI2]);cos02=cosf(p[PHI0]-p[PHI2]);
-    if (fabsf(sin32)<1.0e-6f) return -1;
-    inv_sin32=1.0f/sin32;inv_length=1.0f/p[LEG_LENGTH];
-    p[J11]=c->thigh_length_m*sin03*sin12*inv_sin32;
-    p[J12]=c->thigh_length_m*sin02*sin34*inv_sin32;
-    p[J21]=c->thigh_length_m*cos03*sin12*inv_sin32*inv_length;
-    p[J22]=c->thigh_length_m*cos02*sin34*inv_sin32*inv_length;
-    p[LEG_RATE]=p[J11]*p[PHI1_RATE]+p[J12]*p[PHI4_RATE];
-    p[LEG_ACCEL]=0.05f*((p[LEG_RATE]-p[LAST_LEG_RATE])/c->sample_time_s)+0.95f*p[LEG_ACCEL];
-    p[LAST_LEG_RATE]=p[LEG_RATE];
-    p[PHI0_RATE]=p[J21]*p[PHI1_RATE]+p[J22]*p[PHI4_RATE];
-    p[THETA_RATE]=p[PHI0_RATE]-pitch_rate;
-    p[THETA_ACCEL]=0.2f*((p[THETA_RATE]-p[LAST_THETA_RATE])/c->sample_time_s)+0.8f*p[THETA_ACCEL];
-    p[LAST_THETA_RATE]=p[THETA_RATE];
-    return 0;
-}
+#include "wlc_kinematics.h"
 
 static float scheduled_gain(const float coefficients[4], float length)
 {
@@ -218,7 +180,7 @@ int Wlc_Step(WlcContext *ctx, const WlcInput *in, const WlcCommand *cmd,
         p[PHI1_RATE]=in->joint_rate_rad_s[joint];p[PHI4_RATE]=in->joint_rate_rad_s[joint+1u];
         p[NORMAL_FORCE]=in->normal_force_n[side];p[FLYING]=p[NORMAL_FORCE]<ctx->config.airborne_force_n?1.0f:0.0f;
         if (p[FLYING]) status|=side==0u?WLC_STATUS_LEFT_AIRBORNE:WLC_STATUS_RIGHT_AIRBORNE;
-        if (link_to_leg(p,&ctx->config,in->pitch_rad,in->pitch_rate_rad_s)) {
+        if (leg_to_virtual(p,&ctx->config,in->pitch_rad,in->pitch_rate_rad_s)) {
             out->status_flags=status|WLC_STATUS_KINEMATICS_INVALID;return -2;
         }
         state_feedback(p,&ctx->config,ctx->target_distance,ctx->target_velocity,
